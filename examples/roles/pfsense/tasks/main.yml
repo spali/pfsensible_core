@@ -14,7 +14,7 @@
         address: "172.16.10.10 172.16.10.11"
         descr: "Active Directory Servers",
         detail: "ad1||ad2" }
-    - "{{ pfsensible.core.aliases }}"
+    - "{{ pfsense_aliases }}"
 
   - name: "Set local network"
     set_fact:
