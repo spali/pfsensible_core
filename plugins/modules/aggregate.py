@@ -248,6 +248,10 @@ options:
           - timerep, timereq, timex, toobig, trace, unreach, wrurep, wrureq
         default: any
         type: str
+      sched:
+        description: Schedule day/time when the rule must be active
+        required: False
+        type: str
   aggregated_rule_separators:
     description: Dict of rule separators to apply on the target
     required: False
@@ -335,6 +339,10 @@ options:
     required: False
     default: False
     type: bool
+  interface_filter:
+    description: only apply rules and rules separators on this interface
+    required: False
+    type: str
 """
 
 EXAMPLES = """
@@ -519,9 +527,30 @@ class PFSenseModuleAggregate(object):
                 return True
         return False
 
+    @staticmethod
+    def is_filtered(interface_filter, floating_filter, params):
+        if interface_filter is None:
+            return False
+
+        if 'floating' in params:
+            if isinstance(params['floating'], str):
+                floating = params['floating'].lower()
+            else:
+                floating = 'true' if params['floating'] else 'false'
+
+            if floating != 'false' and floating != 'no':
+                return not floating_filter
+
+        return floating_filter or params['interface'].lower() != interface_filter
+
     def run_rules(self):
         """ process input params to add/update/delete all rules """
+
         want = self.module.params['aggregated_rules']
+        interface_filter = self.module.params['interface_filter'].lower() if self.module.params.get('interface_filter') is not None else None
+        floating_filter = False
+        if interface_filter is not None and interface_filter.lower() == 'floating':
+            floating_filter = True
 
         if want is None:
             return
@@ -534,12 +563,29 @@ class PFSenseModuleAggregate(object):
                     params = {}
                     params['state'] = 'absent'
                     params['name'] = rule_elt.find('descr').text
-                    params['interface'] = self.pfsense.get_interface_display_name(rule_elt.find('interface').text)
+
                     if rule_elt.find('floating') is not None:
                         params['floating'] = True
+                        interfaces = rule_elt.find('interface').text.split(',')
+                        params['interface'] = list()
+                        for interface in interfaces:
+                            target = self.pfsense.get_interface_display_name(interface, return_none=True)
+                            if target is not None:
+                                params['interface'].append(target)
+                            else:
+                                params['interface'].append(interface)
+                        params['interface'] = ','.join(params['interface'])
+                    else:
+                        params['interface'] = self.pfsense.get_interface_display_name(rule_elt.find('interface').text, return_none=True)
+
+                    if params['interface'] is None:
+                        continue
+
                     todel.append(params)
 
             for params in todel:
+                if self.is_filtered(interface_filter, floating_filter, params):
+                    continue
                 self.pfsense_rules.run(params)
 
         # generating order if required
@@ -568,6 +614,8 @@ class PFSenseModuleAggregate(object):
 
         # processing aggregated parameters
         for params in want:
+            if self.is_filtered(interface_filter, floating_filter, params):
+                continue
             self.pfsense_rules.run(params)
 
     def run_aliases(self):
@@ -623,13 +671,19 @@ class PFSenseModuleAggregate(object):
     def run_rule_separators(self):
         """ process input params to add/update/delete all separators """
         want = self.module.params['aggregated_rule_separators']
+        interface_filter = self.module.params['interface_filter'].lower() if self.module.params.get('interface_filter') is not None else None
+        floating_filter = False
+        if interface_filter is not None and interface_filter.lower() == 'floating':
+            floating_filter = True
 
         if want is None:
             return
 
         # processing aggregated parameter
-        for param in want:
-            self.pfsense_rule_separators.run(param)
+        for params in want:
+            if self.is_filtered(interface_filter, floating_filter, params):
+                continue
+            self.pfsense_rule_separators.run(params)
 
         # delete every other if required
         if self.module.params['purge_rule_separators']:
@@ -643,10 +697,14 @@ class PFSenseModuleAggregate(object):
                         if interface_elt.tag == 'floatingrules':
                             params['floating'] = True
                         else:
-                            params['interface'] = self.pfsense.get_interface_display_name(interface_elt.tag)
+                            params['interface'] = self.pfsense.get_interface_display_name(interface_elt.tag, return_none=True)
+                            if params['interface'] is None:
+                                continue
                         todel.append(params)
 
             for params in todel:
+                if self.is_filtered(interface_filter, floating_filter, params):
+                    continue
                 self.pfsense_rule_separators.run(params)
 
     def run_vlans(self):
@@ -714,6 +772,7 @@ def main():
         purge_rules=dict(default=False, type='bool'),
         purge_rule_separators=dict(default=False, type='bool'),
         purge_vlans=dict(default=False, type='bool'),
+        interface_filter=dict(required=False, type='str'),
     )
 
     required_one_of = [['aggregated_aliases', 'aggregated_interfaces', 'aggregated_rules', 'aggregated_rule_separators', 'aggregated_vlans']]

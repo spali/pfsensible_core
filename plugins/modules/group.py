@@ -55,9 +55,10 @@ EXAMPLES = """
 - name: Add adservers group
   pfsensible.core.group:
     name: Domain Admins
-    description: Remote Admins
+    descr: Remote Admins
     scope: remote
     priv: [ 'page-all', 'user-shell-access' ]
+    state: present
 
 - name: Remove group
   pfsensible.core.group:

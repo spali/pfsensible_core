@@ -58,7 +58,7 @@ and on which interfaces, the plugin check if rule source or destination is
 matching any local or routed network on the pfsense. To avoid having every rule
 declared on a wan interface, if a rule can be declared on multiple interfaces
 it is not on the ones routing 0.0.0.0/0 if there is another which is not routing it.
-If a network is declared as routed (accessible thru) on an interface and is also defined
+If a network is declared as remote (routed thru) on an interface and is also defined
 as the local network on an interface of the target pfsense, the local network is preffered.
 The same apply to adjacent networks, which indicates neighbor networks that are routed thru a pfSense.
 
@@ -74,7 +74,7 @@ names in the form 'GROUP1 - GROUP2 - ...'
 
 You can define a default value for all rules and subrules of a separator using
 the name 'options'. The parameters supported this way are gateway, log, queue, ackqueue,
-in_queue and out_queue. You can override those default values setting other values
+in_queue, out_queue and sched. You can override those default values setting other values
 on a deeper options set or inside the rule definition.
 
 You can use an extra parameter in rules and options, filter, to restrict the rule
@@ -113,7 +113,7 @@ pfsenses:
     interfaces: {
       lan: { ip: 192.168.1.1/24, adjacent_networks: lan_data_poc4 },
       lan_100: { ip: 172.16.1.1/24 },
-      vpn: { routed_networks: lan_data_all lan_voip_all},
+      vpn: { remote_networks: lan_data_all lan_voip_all},
       }
     }
 
@@ -121,15 +121,15 @@ pfsenses:
     interfaces: {
       lan: { ip: 192.168.2.1/24 },
       lan_100: { ip: 172.16.2.1/24 },
-      vpn: { routed_networks: lan_data_all lan_voip_all},
+      vpn: { remote_networks: lan_data_all lan_voip_all},
       }
     }
 
   pf3:          {
     interfaces: {
-      bridge_lan: { ip: 192.168.3.1/24, routed_networks: lan_data_all, bridge: True },
-      bridge_lan_100: { ip: 172.16.3.1/24, routed_networks: lan_voip_all, bridge: True },
-      wan: { routed_networks: 0.0.0.0/0 }
+      bridge_lan: { ip: 192.168.3.1/24, remote_networks: lan_data_all, bridge: True },
+      bridge_lan_100: { ip: 172.16.3.1/24, remote_networks: lan_voip_all, bridge: True },
+      wan: { remote_networks: 0.0.0.0/0 }
       }
     }
 
@@ -208,8 +208,8 @@ from ansible.errors import AnsibleError
 from ansible.plugins.lookup import LookupBase
 from ansible.module_utils.compat import ipaddress
 
-OPTION_FIELDS = ['gateway', 'log', 'queue', 'ackqueue', 'in_queue', 'out_queue', 'icmptype', 'filter', 'ifilter']
-OUTPUT_OPTION_FIELDS = ['gateway', 'log', 'queue', 'ackqueue', 'in_queue', 'out_queue', 'icmptype']
+OPTION_FIELDS = ['gateway', 'log', 'queue', 'ackqueue', 'in_queue', 'out_queue', 'icmptype', 'filter', 'ifilter', 'sched']
+OUTPUT_OPTION_FIELDS = ['gateway', 'log', 'queue', 'ackqueue', 'in_queue', 'out_queue', 'icmptype', 'sched']
 
 display = Display()
 
@@ -247,45 +247,83 @@ def static_vars(**kwargs):
     return decorate
 
 
+@static_vars(res_cache=dict())
+def to_ip_address(address):
+    """ convert address to IPv4Address or IPv6Address """
+    res = to_ip_address.res_cache.get(address)
+    if res is None:
+        res = ipaddress.ip_address(to_unicode(address))
+        to_ip_address.res_cache[address] = res
+    return res
+
+
+@static_vars(res_cache=dict())
+def to_ip_network(address, strict=True):
+    """ convert address to IPv4Network or IPv6Network """
+    key = address + str(strict)
+    res = to_ip_network.res_cache.get(key)
+    if res is None:
+        res = ipaddress.ip_network(to_unicode(address), strict=strict)
+        to_ip_network.res_cache[key] = res
+    return res
+
+
 @static_vars(
     classA=ipaddress.IPv4Network((u"10.0.0.0", u"255.0.0.0")),
     classB=ipaddress.IPv4Network((u"172.16.0.0", u"255.240.0.0")),
-    classC=ipaddress.IPv4Network((u"192.168.0.0", u"255.255.0.0")))
+    classC=ipaddress.IPv4Network((u"192.168.0.0", u"255.255.0.0")),
+    res_cache=dict())
 def is_private_ip(address):
     """ check if ip address is class A, B or C """
-    if not isinstance(address, ipaddress.IPv4Address):
-        ip_address = ipaddress.ip_address(to_unicode(address))
-    else:
-        ip_address = address
-    return ip_address in is_private_ip.classA or ip_address in is_private_ip.classB or ip_address in is_private_ip.classC
+    res = is_private_ip.res_cache.get(address)
+    if res is None:
+        if not isinstance(address, ipaddress.IPv4Address):
+            ip_address = to_ip_address(to_unicode(address))
+        else:
+            ip_address = address
+        res = ip_address in is_private_ip.classA or ip_address in is_private_ip.classB or ip_address in is_private_ip.classC
+        is_private_ip.res_cache[address] = res
+    return res
 
 
 @static_vars(
     classA=ipaddress.IPv4Network((u"10.0.0.0", u"255.0.0.0")),
     classB=ipaddress.IPv4Network((u"172.16.0.0", u"255.240.0.0")),
-    classC=ipaddress.IPv4Network((u"192.168.0.0", u"255.255.0.0")))
+    classC=ipaddress.IPv4Network((u"192.168.0.0", u"255.255.0.0")),
+    res_cache=dict())
 def is_private_network(address):
     """ check if network is class A, B or C """
-    if not isinstance(address, ipaddress.IPv4Network):
-        net = ipaddress.ip_network(to_unicode(address))
-    else:
-        net = address
-    return net.subnet_of(is_private_network.classA) or net.subnet_of(is_private_network.classB) or net.subnet_of(is_private_network.classC)
+    res = is_private_network.res_cache.get(address)
+    if res is None:
+        if not isinstance(address, ipaddress.IPv4Network):
+            net = to_ip_network(to_unicode(address))
+        else:
+            net = address
+        res = net.subnet_of(is_private_network.classA) or net.subnet_of(is_private_network.classB) or net.subnet_of(is_private_network.classC)
+        is_private_network.res_cache[address] = res
+    return res
 
 
-@static_vars(ip_broadcast=ipaddress.IPv4Address((u"255.255.255.255")))
+@static_vars(ip_broadcast=ipaddress.IPv4Address((u"255.255.255.255")), res_cache=dict())
 def is_ip_broadcast(address):
     """ check if ip address is ip broadcast address """
-    if not isinstance(address, ipaddress.IPv4Address):
-        ip_address = ipaddress.ip_address(to_unicode(address))
-    else:
-        ip_address = address
-    return ip_address == is_ip_broadcast.ip_broadcast
+    res = is_ip_broadcast.res_cache.get(address)
+    if res is None:
+        if not isinstance(address, ipaddress.IPv4Address):
+            ip_address = to_ip_address(to_unicode(address))
+        else:
+            ip_address = address
+        res = ip_address == is_ip_broadcast.ip_broadcast
+        is_ip_broadcast.res_cache[address] = res
+    return res
 
 
+@static_vars(re_cache=None)
 def is_fqdn(address):
     """ check if address is a fqdn address """
-    return re.match(r'(?=^.{4,253}$)(^((?!-)[a-zA-Z0-9-]{0,62}[a-zA-Z0-9]\.)+[a-zA-Z]{2,63}$)', address) is not None
+    if is_fqdn.re_cache is None:
+        is_fqdn.re_cache = re.compile(r'(?=^.{4,253}$)(^((?!-)[a-zA-Z0-9-]{0,62}[a-zA-Z0-9]\.)+[a-zA-Z]{2,63}$)')
+    return is_fqdn.re_cache.match(address) is not None
 
 
 def resolve_hostname(address, dns_servers=None):
@@ -321,7 +359,7 @@ def resolve_hostname(address, dns_servers=None):
 def is_valid_ip(address):
     """ validate ip address format """
     try:
-        ipaddress.ip_address(to_unicode(address))
+        to_ip_address(to_unicode(address))
         return True
     except ValueError:
         return False
@@ -351,7 +389,7 @@ def is_valid_port_range(port_range):
 def is_valid_network(address):
     """ validate network address format """
     try:
-        ipaddress.ip_network(to_unicode(address))
+        to_ip_network(to_unicode(address))
         return True
     except ValueError:
         return False
@@ -446,7 +484,7 @@ class PFSenseHostAlias(object):
 
             # it's an ip address
             try:
-                host_ip = ipaddress.ip_address(to_unicode(address))
+                host_ip = to_ip_address(to_unicode(address))
                 self.ips.append(host_ip)
                 continue
             except ValueError:
@@ -454,7 +492,7 @@ class PFSenseHostAlias(object):
 
             # it's an ip network
             try:
-                net = ipaddress.ip_network(to_unicode(address))
+                net = to_ip_network(to_unicode(address))
                 self.networks.append(net)
                 continue
             except ValueError:
@@ -464,7 +502,7 @@ class PFSenseHostAlias(object):
             if address not in data.all_aliases:
                 if is_fqdn(address):
                     resolved_ip = resolve_hostname(address, self.dns)
-                    host_ip = ipaddress.ip_address(to_unicode(resolved_ip))
+                    host_ip = to_ip_address(to_unicode(resolved_ip))
                     self.ips.append(host_ip)
                     continue
 
@@ -500,9 +538,9 @@ class PFSenseHostAlias(object):
         """ check if an alias is in the local network of an interface """
         return self._is_in_networks(interface, 'local_network_contains')
 
-    def is_in_routed_networks(self, interface):
-        """ check if an alias is in the routed networks of an interface """
-        return self._is_in_networks(interface, 'routed_networks_contains')
+    def is_in_remote_networks(self, interface):
+        """ check if an alias is in the remote networks of an interface """
+        return self._is_in_networks(interface, 'remote_networks_contains')
 
     def is_in_adjacent_networks(self, interface):
         """ check if an alias is in the adjacent networks of an interface """
@@ -518,11 +556,11 @@ class PFSenseHostAlias(object):
                 continue
 
             for alias_ip in self.ips:
-                interfaces = pfsense.interfaces_routed_networks_contains(alias_ip)
+                interfaces = pfsense.interfaces_remote_networks_contains(alias_ip)
                 self.routed_interfaces[pfsense.name].update(interfaces)
 
             for alias_net in self.networks:
-                interfaces = pfsense.interfaces_routed_networks_contains(alias_net)
+                interfaces = pfsense.interfaces_remote_networks_contains(alias_net)
                 self.routed_interfaces[pfsense.name].update(interfaces)
 
     def compute_local_interfaces(self, data):
@@ -552,20 +590,20 @@ class PFSenseHostAlias(object):
 
         return True
 
-    def routed_by_interfaces(self, pfsense, use_routed_networks=True):
-        """ return all interfaces for which all ips/networks match a adjacent/routed network in pfense """
+    def routed_by_interfaces(self, pfsense, use_remote_networks=True):
+        """ return all interfaces for which all ips/networks match a adjacent/remote network in pfense """
         interfaces = set()
         for interface in pfsense.interfaces.values():
             all_found = True
             # we must found a routing network for each ip
             for alias_ip in self.ips:
-                if not interface.adjacent_networks_contains(alias_ip) and (not use_routed_networks or not interface.routed_networks_contains(alias_ip)):
+                if not interface.adjacent_networks_contains(alias_ip) and (not use_remote_networks or not interface.remote_networks_contains(alias_ip)):
                     all_found = False
                     break
 
             # we must found a routing network for each network
             for alias_net in self.networks:
-                if not interface.adjacent_networks_contains(alias_net) and (not use_routed_networks or not interface.routed_networks_contains(alias_net)):
+                if not interface.adjacent_networks_contains(alias_net) and (not use_remote_networks or not interface.remote_networks_contains(alias_net)):
                     all_found = False
                     break
 
@@ -573,20 +611,20 @@ class PFSenseHostAlias(object):
                 interfaces.add(interface.name)
         return interfaces
 
-    def is_adjacent_or_routed(self, pfsense):
-        """ check if all ips/networks are in a adjacent/routed network in pfense """
+    def is_adjacent_or_remote(self, pfsense):
+        """ check if all ips/networks are in a adjacent/remote network in pfense """
         for alias_ip in self.ips:
-            if not pfsense.any_routed_networks_contains(alias_ip) and not pfsense.any_adjacent_networks_contains(alias_ip):
+            if not pfsense.any_remote_networks_contains(alias_ip) and not pfsense.any_adjacent_networks_contains(alias_ip):
                 return False
 
         for alias_net in self.networks:
-            if not pfsense.any_routed_networks_contains(alias_net) and not pfsense.any_adjacent_networks_contains(alias_net):
+            if not pfsense.any_remote_networks_contains(alias_net) and not pfsense.any_adjacent_networks_contains(alias_net):
                 return False
 
         return True
 
     def is_adjacent(self, pfsense):
-        """ check if all ips/networks are in a adjacent/routed network in pfense """
+        """ check if all ips/networks are in a adjacent network in pfense """
         for alias_ip in self.ips:
             if not pfsense.any_adjacent_networks_contains(alias_ip):
                 return False
@@ -605,71 +643,93 @@ class PFSenseHostAlias(object):
 
     def is_whole_in_pfsense(self, pfsense):
         """ check if all ips/networks have as least one interface in pfense """
+        if self.name in pfsense.is_whole_in_pfsense_cache:
+            return pfsense.is_whole_in_pfsense_cache[self.name]
+
         for alias_ip in self.ips:
             if is_ip_broadcast(alias_ip):
+                pfsense.is_whole_in_pfsense_cache[self.name] = False
                 return False
 
             if not pfsense.any_network_contains(alias_ip):
+                pfsense.is_whole_in_pfsense_cache[self.name] = False
                 return False
 
         for alias_net in self.networks:
             if not pfsense.any_network_contains(alias_net):
+                pfsense.is_whole_in_pfsense_cache[self.name] = False
                 return False
 
+        pfsense.is_whole_in_pfsense_cache[self.name] = True
         return True
 
     def is_whole_not_in_pfsense(self, pfsense):
         """ check if all ips/networks have as least one interface in pfense """
+        if self.name in pfsense.is_whole_not_in_pfsense_cache:
+            return pfsense.is_whole_not_in_pfsense_cache[self.name]
+
         for alias_ip in self.ips:
             if is_ip_broadcast(alias_ip):
+                pfsense.is_whole_not_in_pfsense_cache[self.name] = False
                 return False
             if pfsense.any_network_contains(alias_ip):
+                pfsense.is_whole_not_in_pfsense_cache[self.name] = False
                 return False
 
         for alias_net in self.networks:
             if pfsense.any_network_contains(alias_net):
+                pfsense.is_whole_not_in_pfsense_cache[self.name] = False
                 return False
 
+        pfsense.is_whole_not_in_pfsense_cache[self.name] = True
         return True
 
     def is_whole_in_same_routing_ifaces(self, pfsense):
         """ check if all ips/networks have the same interfaces in pfense """
+        if self.name in pfsense.is_whole_in_same_routing_ifaces_cache:
+            return pfsense.is_whole_in_same_routing_ifaces_cache[self.name]
 
         # we loop threw all ips/networks in the alias
         # if there is any difference in the interfaces where the address need to be defined
         # then we return False so the parent function split the alias
         target_ar_interfaces = None
         target_local_interfaces = None
+
         for alias_ip in self.ips:
-            interfaces = pfsense.interfaces_adjacent_or_routed_networks_contains(alias_ip)
+            interfaces = pfsense.interfaces_adjacent_or_remote_networks_contains(alias_ip)
             pfsense.hack_internet_routing(interfaces)
-            if not target_ar_interfaces:
+            if target_ar_interfaces is None:
                 target_ar_interfaces = interfaces
             elif target_ar_interfaces ^ interfaces:
+                pfsense.is_whole_in_same_routing_ifaces_cache[self.name] = False
                 return False
 
             interfaces = pfsense.interfaces_local_networks_contains(alias_ip)
             pfsense.hack_internet_routing(interfaces)
-            if not target_local_interfaces:
+            if target_local_interfaces is None:
                 target_local_interfaces = interfaces
             elif target_local_interfaces ^ interfaces:
+                pfsense.is_whole_in_same_routing_ifaces_cache[self.name] = False
                 return False
 
         for alias_net in self.networks:
-            interfaces = pfsense.interfaces_adjacent_or_routed_networks_contains(alias_net)
+            interfaces = pfsense.interfaces_adjacent_or_remote_networks_contains(alias_net)
             pfsense.hack_internet_routing(interfaces)
-            if not target_ar_interfaces:
+            if target_ar_interfaces is None:
                 target_ar_interfaces = interfaces
             elif target_ar_interfaces ^ interfaces:
+                pfsense.is_whole_in_same_routing_ifaces_cache[self.name] = False
                 return False
 
             interfaces = pfsense.interfaces_local_networks_contains(alias_net)
             pfsense.hack_internet_routing(interfaces)
-            if not target_local_interfaces:
+            if target_local_interfaces is None:
                 target_local_interfaces = interfaces
             elif target_local_interfaces ^ interfaces:
+                pfsense.is_whole_in_same_routing_ifaces_cache[self.name] = False
                 return False
 
+        pfsense.is_whole_in_same_routing_ifaces_cache[self.name] = True
         return True
 
     def match_local_interface_ip(self, pfsense):
@@ -764,9 +824,11 @@ class PFSenseInterface(object):
         self.name = None
         self.local_ips = set()
         self.local_networks = set()
-        self.routed_networks = set()
+        self.remote_networks = set()
         self.adjacent_networks = set()
         self.bridge = False
+        self._remote_networks_contains_cache = dict()
+        self._adjacent_networks_contains_cache = dict()
 
     @staticmethod
     def _networks_contains(address, networks):
@@ -786,16 +848,24 @@ class PFSenseInterface(object):
                     if address.subnet_of(snet):
                         return True
         else:
-            raise AssertionError('wrong type in routed_networks_contains:' + type(address))
+            raise AssertionError('wrong type in remote_networks_contains:' + type(address))
         return False
 
-    def routed_networks_contains(self, address):
-        """ return true if address is routed on this interface """
-        return self._networks_contains(address, self.routed_networks)
+    def remote_networks_contains(self, address):
+        """ return true if address is defined in remote_networks of this interface """
+        res = self._remote_networks_contains_cache.get(address)
+        if res is None:
+            res = self._networks_contains(address, self.remote_networks)
+            self._remote_networks_contains_cache[address] = res
+        return res
 
     def adjacent_networks_contains(self, address):
-        """ return true if address is routed on this interface """
-        return self._networks_contains(address, self.adjacent_networks)
+        """ return true if address is defined in adjacent_networks of this interface """
+        res = self._adjacent_networks_contains_cache.get(address)
+        if res is None:
+            res = self._networks_contains(address, self.adjacent_networks)
+            self._adjacent_networks_contains_cache[address] = res
+        return res
 
     def local_network_contains(self, address):
         """ return true if address is in the local network of this interface """
@@ -823,22 +893,28 @@ class PFSense(object):
     def __init__(self, name, interfaces):
         self.name = name
         self.interfaces = interfaces
+        self.is_whole_in_pfsense_cache = dict()
+        self.is_whole_not_in_pfsense_cache = dict()
+        self.is_whole_in_same_routing_ifaces_cache = dict()
+        self._interfaces_local_networks_contains_cache = dict()
+        self._interfaces_remote_networks_contains_cache = dict()
+        self._interfaces_adjacent_networks_contains_cache = dict()
 
     def any_adjacent_networks_contains(self, address):
-        """ return true if address is in adjacent networks of any interface """
+        """ return true if address is defined in adjacent_networks of any interface """
         return len(self.interfaces_adjacent_networks_contains(address)) != 0
 
-    def any_routed_networks_contains(self, address):
-        """ return true if address is in routed networks of any interface """
-        return len(self.interfaces_routed_networks_contains(address)) != 0
+    def any_remote_networks_contains(self, address):
+        """ return true if address is defined in remote_networks of any interface """
+        return len(self.interfaces_remote_networks_contains(address)) != 0
 
     def any_local_network_contains(self, address):
-        """ return true if address is in the local network of any interface """
+        """ return true if address is defined in local network of any interface """
         return len(self.interfaces_local_networks_contains(address)) != 0
 
     def any_network_contains(self, address):
-        """ return true if address is in the local or routed networks of any interface """
-        return self.any_local_network_contains(address) or self.any_routed_networks_contains(address) or self.any_adjacent_networks_contains(address)
+        """ return true if address is defined in the local, remote or adjacent networks of any interface """
+        return self.any_local_network_contains(address) or self.any_remote_networks_contains(address) or self.any_adjacent_networks_contains(address)
 
     def _interfaces_network_contains(self, address, networks_name):
         """ return interfaces names where address is in the interface network  """
@@ -873,19 +949,31 @@ class PFSense(object):
 
     def interfaces_local_networks_contains(self, address):
         """ return interfaces names where address is in the interface local network  """
-        return self._interfaces_network_contains(address, 'local_networks')
+        res = self._interfaces_local_networks_contains_cache.get(address)
+        if res is None:
+            res = self._interfaces_network_contains(address, 'local_networks')
+            self._interfaces_local_networks_contains_cache[address] = res
+        return res
 
-    def interfaces_routed_networks_contains(self, address):
-        """ return interfaces names where address is in the interface routed networks  """
-        return self._interfaces_network_contains(address, 'routed_networks')
+    def interfaces_remote_networks_contains(self, address):
+        """ return interfaces names where address is in the interface remote networks  """
+        res = self._interfaces_remote_networks_contains_cache.get(address)
+        if res is None:
+            res = self._interfaces_network_contains(address, 'remote_networks')
+            self._interfaces_remote_networks_contains_cache[address] = res
+        return res
 
     def interfaces_adjacent_networks_contains(self, address):
         """ return interfaces names where address is in the interface adjacent networks  """
-        return self._interfaces_network_contains(address, 'adjacent_networks')
+        res = self._interfaces_adjacent_networks_contains_cache.get(address)
+        if res is None:
+            res = self._interfaces_network_contains(address, 'adjacent_networks')
+            self._interfaces_adjacent_networks_contains_cache[address] = res
+        return res
 
-    def interfaces_adjacent_or_routed_networks_contains(self, address):
-        """ return interfaces names where address are in the interface local or routed networks """
-        res = self.interfaces_routed_networks_contains(address)
+    def interfaces_adjacent_or_remote_networks_contains(self, address):
+        """ return interfaces names where address are in the interface local or remote networks """
+        res = self.interfaces_remote_networks_contains(address)
         res.update(self.interfaces_adjacent_networks_contains(address))
         return res
 
@@ -901,7 +989,7 @@ class PFSense(object):
         internet_interfaces = set()
         for interface in interfaces:
             found = False
-            for network in self.interfaces[interface].routed_networks:
+            for network in self.interfaces[interface].remote_networks:
                 if network == self.hack_internet_routing.internet:
                     found = True
                     internet_interfaces.add(interface)
@@ -1383,7 +1471,7 @@ class PFSenseDataParser(object):
             if 'ip' in interface:
                 for ip in interface['ip'].split(' '):
                     try:
-                        local_network = ipaddress.ip_network(to_unicode(ip), False)
+                        local_network = to_ip_network(to_unicode(ip), False)
                     except ValueError:
                         self._data.set_error("Invalid network " + ip + " in " + name)
                         ret = {}
@@ -1397,7 +1485,7 @@ class PFSenseDataParser(object):
                     # extracting & checking ip
                     group = re.match(r'([^\/]*)\/(\d+)', ip)
                     try:
-                        local_ip = ipaddress.ip_address(to_unicode(group.group(1)))
+                        local_ip = to_ip_address(to_unicode(group.group(1)))
                     except ValueError:
                         self._data.set_error("Invalid ip " + ip + " in " + name)
                         ret = {}
@@ -1405,15 +1493,15 @@ class PFSenseDataParser(object):
                     local_ips.add(local_ip)
                     local_networks.add(local_network)
 
-            # extracting & checking routed networks
-            routed_networks = set()
-            if 'routed_networks' in interface:
-                networks = self._data.unalias_ip(interface['routed_networks'])
+            # extracting & checking remote networks
+            remote_networks = set()
+            if 'remote_networks' in interface:
+                networks = self._data.unalias_ip(interface['remote_networks'])
                 for network in networks:
                     try:
-                        routed_networks.add(ipaddress.ip_network(to_unicode(network)))
+                        remote_networks.add(to_ip_network(to_unicode(network)))
                     except ValueError:
-                        self._data.set_error("Invalid network " + network + " in routed_networks of " + name)
+                        self._data.set_error("Invalid network " + network + " in remote_networks of " + name)
                         return {}
 
             # extracting & checking adjacent networks
@@ -1422,7 +1510,7 @@ class PFSenseDataParser(object):
                 networks = self._data.unalias_ip(interface['adjacent_networks'])
                 for network in networks:
                     try:
-                        adjacent_networks.add(ipaddress.ip_network(to_unicode(network)))
+                        adjacent_networks.add(to_ip_network(to_unicode(network)))
                     except ValueError:
                         self._data.set_error("Invalid network " + network + " in adjacent_networks of " + name)
                         return {}
@@ -1432,7 +1520,7 @@ class PFSenseDataParser(object):
             obj.local_ips = local_ips
             obj.local_networks = local_networks
             obj.bridge = (interface.get('bridge'))
-            obj.routed_networks = routed_networks
+            obj.remote_networks = remote_networks
             obj.adjacent_networks = adjacent_networks
             ret[iname] = obj
 
@@ -1516,8 +1604,14 @@ class PFSenseRuleDecomposer(object):
         host is expanded to sub-aliases if required """
         ret = []
         if host.is_whole_not_in_pfsense(self._data.target):
+            if self._data.debug is not None and self._data.debug == host.name:
+                display.warning('{0}: is_whole_not_in_pfsense {1}'.format(host.name, self._data.target.name))
+
             ret.append(host)
         elif host.is_whole_in_pfsense(self._data.target):
+            if self._data.debug is not None and self._data.debug == host.name:
+                display.warning('{0}: is_whole_in_pfsense {1}'.format(host.name, self._data.target.name))
+
             ret.append(host)
         elif host.is_ip_broadcast():
             ret.append(host)
@@ -1526,6 +1620,8 @@ class PFSenseRuleDecomposer(object):
             if 'ip' in alias:
                 for alias_ip in alias['ip'].split(' '):
                     ret_n = self.host_separate(self._data.hosts_aliases_obj[alias_ip])
+                    if self._data.debug is not None and self._data.debug == host.name:
+                        display.warning('{0}: host_separate: {1}'.format(host.name, ret_n))
                     ret.extend(ret_n)
 
         return ret
@@ -1536,12 +1632,16 @@ class PFSenseRuleDecomposer(object):
         host is expanded to sub-aliases if required """
         ret = []
         if host.is_whole_in_same_routing_ifaces(self._data.target):
+            if self._data.debug is not None and self._data.debug == host.name:
+                display.warning('{0}: is_whole_in_same_routing_ifaces {1}'.format(host.name, self._data.target.name))
             ret.append(host)
         else:
             alias = self._data.all_aliases[host.name]
             if 'ip' in alias:
                 for alias_ip in alias['ip'].split(' '):
                     ret_n = self.host_separate_by_iface(self._data.hosts_aliases_obj[alias_ip])
+                    if self._data.debug is not None and self._data.debug == host.name:
+                        display.warning('{0}: host_separate_by_iface: {1}'.format(host.name, ret_n))
                     ret.extend(ret_n)
 
         return ret
@@ -1677,6 +1777,9 @@ class PFSenseAliasFactory(object):
             definition['state'] = 'present'
             if 'descr' in alias:
                 definition['descr'] = alias['descr']
+            else:
+                definition['descr'] = ''
+            definition['detail'] = ''
             ret.append(definition)
 
         for name, alias in ports_aliases.items():
@@ -1687,6 +1790,9 @@ class PFSenseAliasFactory(object):
             definition['state'] = 'present'
             if 'descr' in alias:
                 definition['descr'] = alias['descr']
+            else:
+                definition['descr'] = ''
+            definition['detail'] = ''
             ret.append(definition)
 
         return ret
@@ -1748,19 +1854,19 @@ class PFSenseRuleFactory(object):
             if dst.is_whole_local(self._data.target):
                 return set(self._data.target.interfaces.keys())
 
-            # otherwise we return all interfaces of target if the destination is adjacent/routable
+            # otherwise we return all interfaces of target if the destination is adjacent/remote
             # (we must be able to reach the destination to allow any src to access it)
             for iface, interface in self._data.target.interfaces.items():
-                if dst.is_in_adjacent_networks(interface) or dst.is_in_routed_networks(interface):
+                if dst.is_in_adjacent_networks(interface) or dst.is_in_remote_networks(interface):
                     return set(self._data.target.interfaces.keys())
             return set()
 
         elif rule_obj.dst[0].name == 'any':
             # we allow the interfaces matching the source ip/networks
-            # or the adjacent/routed networks
+            # or the adjacent/remote networks
             interfaces = set()
             for iface, interface in self._data.target.interfaces.items():
-                if src.is_in_local_network(interface) or src.is_in_adjacent_networks(interface) or src.is_in_routed_networks(interface):
+                if src.is_in_local_network(interface) or src.is_in_adjacent_networks(interface) or src.is_in_remote_networks(interface):
                     interfaces.add(iface)
             if self._data.debug is not None and self._data.debug == rule_obj.name:
                 display.warning('{0}: to_any_dst interfaces={1}'.format(rule_obj.name, interfaces))
@@ -1825,6 +1931,9 @@ class PFSenseRuleFactory(object):
         if len(rule_obj.src) != 1 or len(rule_obj.dst) != 1:
             raise AssertionError()
 
+        if self._data.debug is not None and self._data.debug == rule_obj.name:
+            display.warning('{0}: src={1} dst={2}'.format(rule_obj.name, rule_obj.src[0].name, rule_obj.dst[0].name))
+
         # if the rule uses 'any'
         interfaces = self.rule_interfaces_any(rule_obj)
         if interfaces is not None:
@@ -1845,9 +1954,9 @@ class PFSenseRuleFactory(object):
         # if it's a blocking or reject rule, we only use the src
         if rule_obj.action != 'pass':
             if src_is_local:
-                interfaces.update(rule_obj.src[0].local_interfaces[self._data.target.name])
+                interfaces = rule_obj.src[0].local_interfaces[self._data.target.name]
             else:
-                interfaces.update(rule_obj.src[0].routed_by_interfaces(self._data.target, True))
+                interfaces = rule_obj.src[0].routed_by_interfaces(self._data.target, True)
 
             if len(interfaces) > 1:
                 raise AssertionError('Invalid local interfaces count for {0}: {1}'.format(rule_obj.name, len(interfaces)))
@@ -1875,18 +1984,18 @@ class PFSenseRuleFactory(object):
             return filter_interfaces(rule_obj.src[0].local_interfaces[self._data.target.name])
 
         # if the destination is unreachable
-        if not dst_is_local and src_is_local and not rule_obj.dst[0].is_adjacent_or_routed(self._data.target):
+        if not dst_is_local and src_is_local and not rule_obj.dst[0].is_adjacent_or_remote(self._data.target):
             if self._display_warnings:
                 display.warning(
-                    'Destination {0} is not accessible from this pfSense for {1}.Please add the right adjacent/routed network if it\'s not an error'
+                    'Destination {0} is not accessible from this pfSense for {1}.Please add the right adjacent/remote network if it\'s not an error'
                     .format(rule_obj.dst[0].name, rule_obj.name))
             return set()
 
         # if the source is unreachable
-        if not src_is_local and dst_is_local and not rule_obj.src[0].is_adjacent_or_routed(self._data.target):
+        if not src_is_local and dst_is_local and not rule_obj.src[0].is_adjacent_or_remote(self._data.target):
             if self._display_warnings:
                 display.warning(
-                    'Source {0} can not access to this pfSense for {1}. Please add the right adjacent/routed network if it\'s not an error'
+                    'Source {0} can not access to this pfSense for {1}. Please add the right adjacent/remote network if it\'s not an error'
                     .format(rule_obj.src[0].name, rule_obj.name))
             return set()
 
@@ -1905,10 +2014,20 @@ class PFSenseRuleFactory(object):
             # if they are both not local and on the same interfaces or with an unreachable destination
             # we return nothing
             if not dst_is_local:
-                # if the source is an adjacent networks, it can get out to reach routed networks
+                dst_is_adjacent = rule_obj.dst[0].is_adjacent(self._data.target)
+
+                # if the source is remote and the destination is adjacent, we return the source interfaces
+                if not src_is_adjacent and dst_is_adjacent:
+                    return filter_interfaces(routing_interfaces)
+
+                # if the source is an adjacent networks, it can get out to reach remote networks
                 dst_routing_interfaces = rule_obj.dst[0].routed_by_interfaces(self._data.target, src_is_adjacent)
                 if self._data.debug is not None and self._data.debug == rule_obj.name:
-                    display.warning('{0}: dst_routing_interfaces={1}'.format(rule_obj.name, dst_routing_interfaces))
+                    display.warning('{0}: dst_is_adjacent={1}, dst_routing_interfaces={2}'.format(rule_obj.name, dst_is_adjacent, dst_routing_interfaces))
+
+                # if the source is adjacent and the destination is remote, we return the source interfaces
+                if src_is_adjacent and len(dst_routing_interfaces):
+                    return filter_interfaces(routing_interfaces)
 
                 routing_interfaces = routing_interfaces.difference(dst_routing_interfaces)
                 if not routing_interfaces or not dst_routing_interfaces:
@@ -2157,23 +2276,40 @@ class PFSenseRuleSeparatorFactory(object):
 class LookupModule(LookupBase):
     """ Lookup module generating pfsense definitions """
 
+    def get_hostname(self):
+        """ Just for easier mock """
+        myvars = getattr(self._templar, '_available_variables', {})
+        return myvars['inventory_hostname']
+
+    @staticmethod
+    def get_definitions(from_file):
+        """ Just for easier mock """
+        return ordered_load(open(from_file), yaml.SafeLoader)
+
     def load_data(self, from_file):
         """ Load and return pfsense data """
-        myvars = getattr(self._templar, '_available_variables', {})
-        current_host = myvars['inventory_hostname']
+        fvars = self.get_definitions(from_file)
+        if fvars is None:
+            raise AnsibleError("No usable data found in {0}".format(from_file))
 
-        fvars = ordered_load(open(from_file), yaml.SafeLoader)
+        for section in ['hosts_aliases', 'ports_aliases', 'pfsenses', 'rules']:
+            if section not in fvars:
+                raise AnsibleError("Missing {0} section in {1}".format(section, from_file))
+
         data = PFSenseData(
             hosts_aliases=fvars['hosts_aliases'],
             ports_aliases=fvars['ports_aliases'],
             pfsenses=fvars['pfsenses'],
             rules=fvars['rules'],
-            target_name=current_host
+            target_name=self.get_hostname()
         )
         return data
 
     def run(self, terms, variables, **kwargs):
         """ Main function """
+        if len(terms) != 2:
+            raise AnsibleError("pfsense lookup requires a filename and another parameter in [aliases, rules, rule_separators, all_definitions]")
+
         data = self.load_data(terms[0])
 
         parser = PFSenseDataParser(data)
