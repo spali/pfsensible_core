@@ -29,11 +29,13 @@ collections_paths=collections
 ## Configuration
 
 The Python interpreter is in a non-standard location on pfSense, so you will
-need to set in your playbook vars:
+need to set in your playbook or hosts vars:
 
 ```
 ansible_python_interpreter: /usr/local/bin/python2.7
 ```
+
+Note: starting with pfSense 2.4.5, you have to use python 3.7
 
 ## Modules
 The following modules are currently available:
